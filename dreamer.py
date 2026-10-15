@@ -100,14 +100,19 @@ def define_config():
 
 class Dreamer(tools.Module):
 
+  #初始化dreamer模型
   def __init__(self, config, datadir, actspace, writer):
+    #配置dreamer的参数
     self._c = config
+    #环境允许执行的动作范围
     self._actspace = actspace
     self._actdim = actspace.n if hasattr(actspace, 'n') else actspace.shape[0]
     self._writer = writer
     self._random = np.random.RandomState(config.seed)
     with tf.device('cpu:0'):
+      #环境交互步数
       self._step = tf.Variable(count_steps(datadir, config), dtype=tf.int64)
+    #触发函数tool，触发标志位
     self._should_pretrain = tools.Once()
     self._should_train = tools.Every(config.train_every)
     self._should_log = tools.Every(config.log_every)
@@ -117,12 +122,17 @@ class Dreamer(tools.Module):
     self._metrics['expl_amount']  # Create variable for checkpoint.
     self._float = prec.global_policy().compute_dtype
     self._strategy = tf.distribute.MirroredStrategy()
-    with self._strategy.scope():
-      self._dataset = iter(self._strategy.experimental_distribute_dataset(
-          load_dataset(datadir, self._c)))#从 episodes 目录读取保存的经验池
-      self._build_model()#构建模型
 
+    with self._strategy.scope():
+      #从 episodes 目录读取保存的经验池，包括图像、动作、奖励和折扣因子
+      self._dataset = iter(self._strategy.experimental_distribute_dataset(
+          load_dataset(datadir, self._c)))
+      #构建世界模型，actor和critic的神经网络和优化器
+      self._build_model()
+
+  #根据观测图像和当前状态，选择动作，负责一次行动流程
   def __call__(self, obs, reset, state=None, training=True):
+    #获取当前训练的步数
     step = self._step.numpy().item()
     tf.summary.experimental.set_step(step)
     if state is not None and reset.any():
@@ -138,11 +148,13 @@ class Dreamer(tools.Module):
           self.train(next(self._dataset), log_images)
       if log:
         self._write_summaries()
+        #让dreamer选择动作
     action, state = self.policy(obs, state, training)
     if training:
       self._step.assign_add(len(reset) * self._c.action_repeat)
     return action, state
 
+  #
   @tf.function
   def policy(self, obs, state, training):
     if state is None:
@@ -150,9 +162,13 @@ class Dreamer(tools.Module):
       action = tf.zeros((len(obs['image']), self._actdim), self._float)
     else:
       latent, action = state
+      #将观测图像编码为潜在表示
     embed = self._encode(preprocess(obs, self._c))
+    #根据当前动作和观测图像，更新RSSM潜在表示
     latent, _ = self._dynamics.obs_step(latent, action, embed)
+    #根据潜在表示计算特征向量，提取特征
     feat = self._dynamics.get_feat(latent)
+    #根据特征（向量）选择动作
     if training:
       action = self._actor(feat).sample()
     else:
@@ -175,9 +191,13 @@ class Dreamer(tools.Module):
     # 输出: 预测的图像、奖励
     # 损失: 图像重建损失 + 奖励预测损失 + KL散度
     with tf.GradientTape() as model_tape:
+      #将观测图像编码为潜在表示
       embed = self._encode(data)
+      #先验和后验状态
       post, prior = self._dynamics.observe(embed, data['action'])
+      #根据后验状态提取特征
       feat = self._dynamics.get_feat(post)
+      #根据特征预测图像和奖励
       image_pred = self._decode(feat)
       reward_pred = self._reward(feat)
       likes = tools.AttrDict()
@@ -203,12 +223,14 @@ class Dreamer(tools.Module):
     # 输出: 计算累计回报（λ-return）
     # 最大化 Actor 的期望回报
     with tf.GradientTape() as actor_tape:
+      #后验post状态作为想象的起点，想象未来轨迹
       imag_feat = self._imagine_ahead(post)
       reward = self._reward(imag_feat).mode()
       if self._c.pcont:
         pcont = self._pcont(imag_feat).mean()
       else:
         pcont = self._c.discount * tf.ones_like(reward)
+
       value = self._value(imag_feat).mode()
       returns = tools.lambda_return(
           reward[:-1], value[:-1], pcont[:-1],
@@ -226,7 +248,8 @@ class Dreamer(tools.Module):
       target = tf.stop_gradient(returns)
       value_loss = -tf.reduce_mean(discount * value_pred.log_prob(target))
       value_loss /= float(self._strategy.num_replicas_in_sync)
-
+   
+    #更新模型参数：根据当前梯度和学习率，反向传播更新模型参数
     model_norm = self._model_opt(model_tape, model_loss)
     actor_norm = self._actor_opt(actor_tape, actor_loss)
     value_norm = self._value_opt(value_tape, value_loss)
@@ -246,6 +269,7 @@ class Dreamer(tools.Module):
         leaky_relu=tf.nn.leaky_relu)
     cnn_act = acts[self._c.cnn_act]
     act = acts[self._c.dense_act]
+    #世界模型：图像编码器 + RSSM + 图像解码器
     self._encode = models.ConvEncoder(self._c.cnn_depth, cnn_act)
     self._dynamics = models.RSSM(
         self._c.stoch_size, self._c.deter_size, self._c.deter_size)
@@ -254,6 +278,7 @@ class Dreamer(tools.Module):
     if self._c.pcont:
       self._pcont = models.DenseDecoder(
           (), 3, self._c.num_units, 'binary', act=act)
+    #critic网络和actor网络
     self._value = models.DenseDecoder((), 3, self._c.num_units, act=act)
     self._actor = models.ActionDecoder(
         self._actdim, 4, self._c.num_units, self._c.action_dist,
@@ -264,12 +289,14 @@ class Dreamer(tools.Module):
     Optimizer = functools.partial(
         tools.Adam, wd=self._c.weight_decay, clip=self._c.grad_clip,
         wdpattern=self._c.weight_decay_pattern)
+    #创建优化器：用于更新模型参数
     self._model_opt = Optimizer('model', model_modules, self._c.model_lr)
     self._value_opt = Optimizer('value', [self._value], self._c.value_lr)
     self._actor_opt = Optimizer('actor', [self._actor], self._c.actor_lr)
     # Do a train step to initialize all variables, including optimizer
     # statistics. Ideally, we would use batch size zero, but that doesn't work
     # in multi-GPU mode.
+    #用一个batch，预热模型参数
     self.train(next(self._dataset))
 
   def _exploration(self, action, training):
@@ -296,6 +323,7 @@ class Dreamer(tools.Module):
           action)
     raise NotImplementedError(self._c.expl)
 
+  #阶段 4: 想象未来轨迹
   def _imagine_ahead(self, post):
     if self._c.pcont:  # Last step could be terminal.
       post = {k: v[:, :-1] for k, v in post.items()}
@@ -464,6 +492,7 @@ def main(config):
   # Train and regularly evaluate the agent.
   step = count_steps(datadir, config)
   print(f'Simulating agent for {config.steps-step} steps.')
+  #创建世界模型，critic网络和actor网络，调用call
   agent = Dreamer(config, datadir, actspace, writer)
   #加载检查点
   if (config.logdir / 'variables.pkl').exists():
