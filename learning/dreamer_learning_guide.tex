@@ -1,0 +1,637 @@
+% !TEX program = xelatex
+% Dreamer (TF2) 新手学习指南 — LaTeX 版
+\documentclass[11pt]{ctexart}
+
+% ---------- 页面与基础宏包 ----------
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{fancyvrb}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\renewcommand{\arraystretch}{1.25}
+\setlist{nosep,leftmargin=1.6em}
+\setlength{\parskip}{0.25em}
+
+\title{\textbf{Dreamer (TF2) 新手学习指南}}
+\author{项目文档 · 面向接手「世界模型 + 异构无人机编队控制」的新同学}
+\date{2026 年 10 月}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ===================================================================
+\section*{导语}
+\begin{quote}
+\textbf{目标读者}：刚接手这个仓库、想把「世界模型 + 异构无人机编队控制」做下去的同学。
+
+\textbf{阅读顺序建议}：先把本文第 1、2、3 节读完（约 40 分钟），再打开代码。
+\end{quote}
+
+% ===================================================================
+\section{先说清楚：这个项目是什么、不是什么}
+
+\subsection{是什么}
+\begin{itemize}
+  \item 2019 年 Dreamer v1 论文 \emph{Dream to Control: Learning Behaviors by Latent Imagination} 的 TensorFlow 2 精简复现。
+  \item 一个\textbf{基于模型的强化学习（MBRL）}智能体：先学一个``世界模型''，再在模型内部``想象''未来轨迹来训练策略。
+  \item 单智能体、\textbf{图像观测}（$64\times64\times3$）、\textbf{连续动作}（DMC 的 MuJoCo 任务）或离散动作（Atari）。
+  \item 代码量很小：5 个 \texttt{.py} 文件约 1900 行，核心 \texttt{dreamer.py} 526 行。这一点对新手极其友好——你能在一天内读完整个算法。
+\end{itemize}
+
+\subsection{不是什么（重要，避免走弯路）}
+\begin{tabularx}{\textwidth}{L L}
+\toprule
+\textbf{你可能以为} & \textbf{实际情况} \\
+\midrule
+这是无人机/编队项目 & 不是。它只认 \texttt{dmc\_*} 和 \texttt{atari\_*} 任务，环境和无人机无关 \\
+\addlinespace
+这是 Dreamer v2 / v3 & 是 \textbf{v1}。没有离散隐变量、没有 KL balancing、没有 symlog/two-hot/percentile 归一化 \\
+\addlinespace
+多智能体框架 & 完全单智能体。\texttt{config.envs} 只是并行跑多个\textbf{独立}环境副本，不是多智能体 \\
+\addlinespace
+观测是状态向量 & 它\textbf{强制}要求 \texttt{obs['image']}，编码器写死了 CNN \\
+\bottomrule
+\end{tabularx}
+
+所以你真正要做的事是：\textbf{读懂它的骨架（世界模型 + 想象训练），然后把``图像单智能体''换成``状态向量多智能体''}。第 8 节给了完整路线。
+
+% ===================================================================
+\section{先跑通（30 分钟）}
+
+\subsection{环境}
+\begin{itemize}
+  \item Python 3.7 + TensorFlow 2.6（conda 环境：\texttt{D:\textbackslash conda\textbackslash conda\_envs\textbackslash dreamer}）
+  \item \textbf{不要升级 TensorFlow}：代码用的是 \texttt{tf.keras.mixed\_precision.experimental}（TF 2.9+ 已移除），一升级就 import 失败。
+  \item \textbf{不要升级 gym}：\texttt{wrappers.py} 用的是旧 API（\texttt{reset()} 不返回 \texttt{(obs, info)}），gym $\geq$ 0.26 会炸。
+  \item MuJoCo / dm\_control 在 Windows 上是最麻烦的一环（\texttt{dreamer.py:12} 设了 \texttt{MUJOCO\_GL=glfw}，需要能开窗口的桌面会话）。
+\end{itemize}
+
+\subsection{命令}
+\begin{Verbatim}[frame=single,fontsize=\small]
+conda activate dreamer
+cd "D:\USTB\Code\dreamer-TensorFlow 2"
+python dreamer.py --logdir ./logdir/dreamer/1 --task dmc_walker_walk
+\end{Verbatim}
+
+\subsection{你会看到什么（用来确认``跑对了''）}
+\begin{enumerate}
+  \item \texttt{Prefill dataset with 5000 steps.} —— 先随机乱走收集 5000 步（\texttt{config.prefill}）。
+  \item \texttt{Found 1234567 model parameters.} $\times$3 —— 编码器/解码器/RSSM/奖励头、价值网络、策略网络三组参数（\texttt{tools.Adam} 里打印）。
+  \item \texttt{Training for 100 steps.} —— 第一次训练是 100 步预热（\texttt{pretrain}），之后每 1000 环境步训练 100 步（\texttt{train\_every} / \texttt{train\_steps}）。
+  \item \texttt{[1000] model\_loss ... actor\_loss ... fps ...} —— 每 1000 步一行日志。
+  \item 每 10000 步一次 \texttt{Start evaluation.} + 一次 \texttt{test episode of length 1000 with return xx.x}。
+  \item \texttt{logdir/dreamer/1/} 下出现 \texttt{episodes/*.npz}、\texttt{metrics.jsonl}、\texttt{events.out.tfevents.*}、\texttt{variables.pkl}。
+\end{enumerate}
+
+\begin{quote}
+显存不够就照《训练成果说明》第五节降参。\textbf{注意}：\texttt{--batch\_size}、\texttt{--batch\_length} 在 \texttt{define\_config()} 里已被改成 25/25（原论文是 50/50），所以本机默认就是``省显存''档。
+\end{quote}
+
+\subsection{没有 MuJoCo 怎么冒烟测试}
+\texttt{tools.py:189} 有个 \texttt{DummyEnv}（返回随机 $64\times64$ 图像、随机奖励），可以在不装 MuJoCo 的情况下验证``整条训练管线能不能跑''。把 \texttt{make\_env} 里 \texttt{wrappers.DeepMindControl(task)} 换成 \texttt{tools.DummyEnv()} 即可（注意它没有 \texttt{close()}，\texttt{Async} 的 \texttt{close} 已经做了 try/except）。这是排查``到底是环境问题还是代码问题''的最快手段。
+
+% ===================================================================
+\section{代码地图（先记这张表）}
+
+\begin{tabularx}{\textwidth}{l l L L}
+\toprule
+\textbf{文件} & \textbf{行数} & \textbf{一句话职责} & \textbf{你要重点看的} \\
+\midrule
+\texttt{dreamer.py} & 526 & 主入口：配置、智能体、训练/评估循环 & \texttt{define\_config} \texttt{Dreamer.\_train} \texttt{\_imagine\_ahead} \texttt{policy} \texttt{main} \\
+\addlinespace
+\texttt{models.py} & 180 & 网络结构：RSSM + CNN 编解码 + 策略/价值头 & \texttt{RSSM.observe/img\_step/obs\_step} \texttt{ConvEncoder} \texttt{ActionDecoder} \\
+\addlinespace
+\texttt{tools.py} & 459 & 工具箱：存取数据、$\lambda$-return、Adam、分布工具 & \texttt{static\_scan} \texttt{lambda\_return} \texttt{Module} \texttt{load\_episodes} \texttt{simulate} \\
+\addlinespace
+\texttt{wrappers.py} & 476 & 环境包装：DMC/Atari、收集器、动作归一化、异步 & \texttt{Collect} \texttt{ActionRepeat} \texttt{RewardObs} \texttt{Async} \\
+\addlinespace
+\texttt{plotting.py} & 309 & 论文风格学习曲线对比图（读 \texttt{metrics.jsonl}） & 基本不用改 \\
+\bottomrule
+\end{tabularx}
+
+\subsection*{关键函数速查（行号）}
+
+\textbf{dreamer.py}
+
+\begin{tabularx}{\textwidth}{l l L}
+\toprule
+\textbf{行} & \textbf{函数} & \textbf{作用} \\
+\midrule
+29 & \texttt{define\_config()} & 所有超参都在这里，改实验先看它 \\
+\addlinespace
+104 & \texttt{Dreamer.\_\_init\_\_} & 建数据迭代器、建模型、预热一次 \\
+\addlinespace
+134 & \texttt{\_\_call\_\_} & \textbf{每次与环境交互时被调用}：先决定要不要训练，再出动作 \\
+\addlinespace
+158 & \texttt{policy()} & 编码 $\rightarrow$ RSSM 后验更新 $\rightarrow$ 出动作（\texttt{@tf.function}） \\
+\addlinespace
+188 & \texttt{\_train()} & \textbf{算法核心}：三个阶段、三个损失、三个优化器 \\
+\addlinespace
+266 & \texttt{\_build\_model()} & 组装所有网络和优化器 \\
+\addlinespace
+327 & \texttt{\_imagine\_ahead()} & 在世界模型里展开 \texttt{horizon} 步 \\
+\addlinespace
+386 & \texttt{preprocess()} & 图像减均值除方差、奖励裁剪 \\
+\addlinespace
+400 & \texttt{load\_dataset()} & 把 npz 变成 \texttt{tf.data} 批（$25\times25$） \\
+\addlinespace
+433 & \texttt{make\_env()} & \textbf{换环境就改这里} \\
+\addlinespace
+458 & \texttt{main()} & prefill $\rightarrow$ 建 agent $\rightarrow$ 循环\{评估, 收集, 保存\} \\
+\bottomrule
+\end{tabularx}
+
+\textbf{models.py}
+
+\begin{tabularx}{\textwidth}{l l L}
+\toprule
+\textbf{行} & \textbf{名字} & \textbf{作用} \\
+\midrule
+10 & \texttt{RSSM} & 循环状态空间模型（deter 200 + stoch 30） \\
+\addlinespace
+30 & \texttt{observe} & 整条轨迹滚动，返回 (post, prior) \\
+\addlinespace
+61 & \texttt{obs\_step} & 单步\textbf{后验}：先 prior 再融合观测 \\
+\addlinespace
+74 & \texttt{img\_step} & 单步\textbf{先验}：只看状态和动作，不看观测 \\
+\addlinespace
+88 / 105 & \texttt{ConvEncoder} / \texttt{ConvDecoder} & 图像 $\leftrightarrow$ 1024 维特征 \\
+\addlinespace
+146 & \texttt{ActionDecoder} & 策略网络，输出 tanh 正态分布 \\
+\bottomrule
+\end{tabularx}
+
+\textbf{tools.py}
+
+\begin{tabularx}{\textwidth}{l l L}
+\toprule
+\textbf{行} & \textbf{名字} & \textbf{作用} \\
+\midrule
+23 & \texttt{Module} & 继承 \texttt{tf.Module}；\texttt{get(name, ctor, ...)} 按名字懒建层 \\
+\addlinespace
+316 & \texttt{lambda\_return} & $\lambda$-return（TD 与 MC 的折中） \\
+\addlinespace
+395 & \texttt{static\_scan} & 用 Python 循环展开时间轴（不是 \texttt{tf.scan}） \\
+\addlinespace
+100 & \texttt{simulate} & 与环境交互的通用循环（支持并行环境、可断点续跑） \\
+\addlinespace
+157 & \texttt{load\_episodes} & 从目录读 npz、缓存、随机切片 \\
+\addlinespace
+341 & \texttt{Adam} & 带梯度裁剪、混合精度 loss scaling 的优化器 \\
+\bottomrule
+\end{tabularx}
+
+% ===================================================================
+\section{一次训练循环到底发生了什么}
+
+\subsection{两个嵌套的循环}
+\begin{Verbatim}[frame=single,fontsize=\small]
+main()                                   <- 外层：环境交互（慢循环）
+ |- prefill: 随机动作跑 5000 步，存 npz
+ |- agent = Dreamer(...)
+ '- while step < 5e6:
+     |- 评估 1 个 episode（training=False，动作取分布众数，无噪声）
+     |- simulate(agent, ..., steps=5000)  <- 收集 5000 个 transition
+     |    '- 每 1000 环境步，__call__ 里触发 train
+     |         '- 内层：train(100 步)       <- 梯度更新（快循环）
+     '- 保存 variables.pkl
+\end{Verbatim}
+
+\textbf{关键理解}：训练是``数据驱动''的，不是``步数驱动''的。\texttt{self.\_step}（\texttt{dreamer.py:114}）是从 \texttt{episodes/} 目录里的文件名统计出来的（\texttt{count\_episodes}），所以：
+\begin{itemize}
+  \item 往目录里放 npz = 假装训练过；
+  \item 删掉 npz = 训练进度回退；
+  \item \texttt{train\_every=1000} 表示``每新增 1000 环境步，做 100 次梯度更新''。
+\end{itemize}
+
+\subsection{数据从哪来、长什么样}
+一次环境交互产生一个 \textbf{transition}：\texttt{\{image: (64,64,3) uint8, action: (A,), reward: (), discount: ()\}}。
+一个 episode 结束时，\texttt{wrappers.Collect}（\texttt{wrappers.py:150}）把它堆成数组存成 \texttt{episodes/<时间戳>-<uuid>-<长度>.npz}。
+
+\texttt{RewardObs}（\texttt{wrappers.py:334}）干了一件很巧的事：\textbf{把 reward 塞进 observation dict}。这样 \texttt{data['reward']} 就在 batch 里，世界模型可以直接监督奖励预测。（你以后换环境也必须保持这个约定。）
+
+\texttt{tools.load\_episodes} 是一个\textbf{无限生成器}：每次随机挑 \texttt{train\_steps=100} 条 episode，每条随机切 \texttt{batch\_length=25} 长的片段。所以 \texttt{tf.data} 每 \texttt{next()} 一次拿到 $25 \times 25$ 的数据。
+
+\subsection{\texttt{\_train()} 的三个阶段（\texttt{dreamer.py:188}）}
+\begin{Verbatim}[frame=single,fontsize=\small]
+        +-- 阶段 1：世界模型 -------------------------------------------+
+        图像 --encode--> embed (B,T,1024)
+             --RSSM.observe--> post, prior (各 B,T,{mean,std,stoch,deter})
+             --get_feat--> feat (B,T,230)
+             |- decode(feat)   -> 重建图像    损失：负对数似然
+             |- reward(feat)   -> 重建奖励    损失：负对数似然（Normal std=1 ~ MSE）
+             '- KL(post || prior)            损失：+ kl_scale * max(KL, free_nats)
+        +-----------------------------------------------------------------+
+        +-- 阶段 2：Actor（策略） ----------------------------------------+
+        从 post 展平出发 --imagine 15 步--> imag_feat (15, B*L, 230)
+             |- reward(imag_feat).mode()
+             |- value(imag_feat).mode()
+             '- lambda_return(...) -> returns
+             actor_loss = -mean(cumprod(pcont) * returns)
+        +-----------------------------------------------------------------+
+        +-- 阶段 3：Critic（价值） ---------------------------------------+
+        value_loss = -mean(cumprod(pcont) * value_pred.log_prob(stop_grad(returns)))
+        +-----------------------------------------------------------------+
+\end{Verbatim}
+
+对应代码：阶段 1 在 193--219 行，阶段 2 在 225--241 行，阶段 3 在 246--250 行，三个优化器在 253--255 行。
+
+\subsection{三个损失各自的含义}
+\begin{tabularx}{\textwidth}{l l l L}
+\toprule
+\textbf{损失} & \textbf{代码} & \textbf{公式} & \textbf{直觉} \\
+\midrule
+世界模型 & \texttt{dreamer.py:218} & $\mathrm{kl\_scale}\cdot\max(\mathrm{KL},3)-(\log p(\text{图})+\log p(\text{奖励}))$ & 既要重建得像，又要隐状态可预测 \\
+\addlinespace
+Actor & \texttt{dreamer.py:240} & $-\mathbb{E}\big[\prod \text{discount}\cdot\lambda\text{-return}\big]$ & 让想象出来的回报越大越好 \\
+\addlinespace
+Critic & \texttt{dreamer.py:249} & $-\mathbb{E}\big[\prod \text{discount}\cdot\log p(\text{target})\big]$ & 把价值网络拟合到 $\lambda$-return 上 \\
+\bottomrule
+\end{tabularx}
+
+关于 \texttt{free\_nats = 3.0}（\texttt{dreamer.py:216}）：KL 项低于 3 nats 就不罚了。这是 v1 的``防塌缩''手段——否则模型会偷懒让后验直接等于先验（不看观测），重建也能勉强达标，但隐状态就没有信息了。
+
+% ===================================================================
+\section{RSSM 精讲（整个框架的心脏）}
+
+\subsection{状态是什么}
+隐状态由两部分拼成（\texttt{models.py:53}）：
+\begin{Verbatim}[frame=single,fontsize=\small]
+state = { deter: h_t (200 维, GRU 记忆) , stoch: z_t (30 维, 随机变量) }
+feat  = concat(z_t, h_t)  -> 230 维   <- 下游所有网络（解码器/奖励/价值/策略）都吃它
+\end{Verbatim}
+\begin{itemize}
+  \item $h_t$ 负责\textbf{确定性}的长时记忆（``我一直在往北飞''）；
+  \item $z_t$ 负责\textbf{随机性/不确定性}（``第 3 架飞机现在到底偏了几米，我不确定''）。
+  \item 两者缺一不可：只有 $h$ 学不了多模态未来，只有 $z$ 记不住长历史。
+\end{itemize}
+
+\subsection{两个 step：先验 vs 后验}
+\begin{Verbatim}[frame=single,fontsize=\small]
+img_step(prev_state, prev_action)          models.py:74
+    x = concat(prev_state.stoch, prev_action)
+    x = Dense(200, elu)(x)
+    x, h = GRUCell(200)(x, prev_state.deter)
+    x = Dense(200, elu)(x) -> Dense(60) -> mean, std
+    prior = {mean, std, stoch: sample, deter: h}
+    ^ 不看观测。用于"想象"和"预测"。
+
+obs_step(prev_state, prev_action, embed)   models.py:61
+    prior = img_step(...)                  <- 先猜
+    x = concat(prior.deter, embed)         <- 再偷看观测
+    post  = {mean, std, stoch, deter: prior.deter}
+    ^ 这就是"后验"。用于训练和在线推理。
+\end{Verbatim}
+
+$\mathrm{std} = \mathrm{softplus}(x) + 0.1$（两处都有）——保证方差恒正且有下界。
+
+\subsection{observe / imagine}
+\begin{itemize}
+  \item \texttt{observe(embed, action)}（\texttt{models.py:30}）：把 $(B,T,\dots)$ 转置成 $(T,B,\dots)$，用 \texttt{static\_scan} 沿时间展开 $T$ 步，\textbf{同时}返回后验序列 \texttt{post} 和先验序列 \texttt{prior}。因为有观测，这是``有老师教''的路径。
+  \item \texttt{imagine(action, state)}（\texttt{models.py:44}）：只调 \texttt{img\_step}，没有任何 embed。这是``闭着眼睛做梦''，Dreamer 的行为学习全靠它。
+\end{itemize}
+
+\begin{quote}
+\textbf{注意}：\texttt{static\_scan}（\texttt{tools.py:395}）是 \textbf{Python for 循环 + tf.stack}，图会随 $T$ 线性膨胀。所以 \texttt{batch\_length=25}、\texttt{horizon=15} 不能随便调大——这直接对应显存和编译时间。
+\end{quote}
+
+\subsection{为什么用 KL(post$\|$prior) 而不是别的}
+训练时后验能看观测，先验不能。让先验去逼近后验 = 把``我看不到观测时的猜测''训练得接近``看到观测后的真相''。这样部署/想象时（只有先验）才不会失真。方向不能反。
+
+% ===================================================================
+\section{想象与 $\lambda$-return}
+
+\subsection{\texttt{\_imagine\_ahead}（\texttt{dreamer.py:327}）}
+\begin{Verbatim}[frame=single,fontsize=\small]
+start = post 展平 (B*L, 30)            # 真实轨迹的后验状态
+states = static_scan(                  # 展开 horizon=15 步
+    lambda prev, _: self._dynamics.img_step(prev, policy(prev)),
+    tf.range(horizon), start)
+\end{Verbatim}
+
+两个容易看漏的点：
+\begin{itemize}
+  \item \texttt{post} 是 $(B,L,30)$，展平成 $(B\cdot L,30)$ 后\textbf{每个时间步都当成一条独立想象的起点}。所以一次训练其实在想象 $B\times L = 25\times25 = 625$ 条轨迹，每条 15 步——这就是 Dreamer 样本效率的来源（一次真实数据，反复榨取）。
+  \item \texttt{policy} 里用了 \texttt{tf.stop\_gradient(get\_feat(state))}（\texttt{dreamer.py:333}）：\textbf{选动作时不传播梯度}，只有后面的 actor loss 才通过动作传播。这是为了让 actor 的梯度路径干净。
+\end{itemize}
+
+\subsection{$\lambda$-return（\texttt{tools.py:316}）}
+\begin{Verbatim}[frame=single,fontsize=\small]
+lambda=1 -> 蒙特卡洛（用满 15 步回报，方差大偏差小）
+lambda=0 -> 单步 TD（用价值网络自举，方差小偏差大）
+本仓库 lambda=0.95（config.disclam）
+\end{Verbatim}
+$\mathrm{bootstrap}=\mathrm{value}[-1]$ 是第 15 步之后的``尾巴''，用价值网络补上。
+
+\subsection{那个 \texttt{cumprod} 是干什么的（\texttt{dreamer.py:238}）}
+\begin{Verbatim}[frame=single,fontsize=\small]
+discount = cumprod([1, pcont[:-2]])
+\end{Verbatim}
+分两种情况：
+\begin{itemize}
+  \item \textbf{\texttt{pcont=False}（本仓库默认，\texttt{dreamer.py:63}）}：\texttt{pcont} 恒为 $0.99 \times \mathbf{1}$（\texttt{dreamer.py:232}），\texttt{cumprod} 就退化成普通的 $0.99^t$ 折扣。此时终止信息只作用到 \texttt{bootstrap} 上。
+  \item \textbf{\texttt{pcont=True}}：\texttt{pcont} 由数据学出``这一步之后是否还继续''，真实终止时它接近 0，\texttt{cumprod} 就会把终止之后的回报清零，不再计入 actor/critic 损失。
+\end{itemize}
+
+\textbf{做无人机任务时如果你的 episode 会因碰撞提前终止，建议开 \texttt{--pcont True}}，否则策略会学到``撞了还能继续拿分''的错觉。
+
+% ===================================================================
+\section{推荐阅读顺序（四遍法)}
+不要从第 1 行读到最后一行，会淹没在细节里。按``问题驱动''读四遍：
+
+\textbf{第 1 遍：跑起来，看现象（1 小时）}
+只读 \texttt{define\_config()} + \texttt{main()}。目标是能回答：``训练一次要多久？输出文件在哪？分数怎么涨？''
+
+\textbf{第 2 遍：只追 shape（2 小时）}
+拿纸画一张 $(B,T,\dots)$ 的流动图：\texttt{data $\rightarrow$ embed $\rightarrow$ post/prior $\rightarrow$ feat $\rightarrow$ image\_pred/reward\_pred $\rightarrow$ imag\_feat $\rightarrow$ returns}。每个箭头旁标维度。遇到不懂的函数先跳过，只记``它把什么变成什么''。
+
+唯一要动手的：在 \texttt{\_train} 里临时加 \texttt{print} 或 \texttt{tf.print} 看 shape。这一步做完你就掌握了 80\%。
+
+\textbf{第 3 遍：读数学（半天）}
+对着论文读 \texttt{RSSM.obs\_step/img\_step}、\texttt{lambda\_return}、\texttt{\_train} 的三个损失。重点是搞清楚：
+\begin{itemize}
+  \item 为什么有 prior 和 post 两套状态？
+  \item 为什么 actor 的梯度能穿过 15 步想象？
+  \item \texttt{free\_nats} 防止的是什么退化？
+\end{itemize}
+
+\textbf{第 4 遍：改一个小东西（半天）}
+比如：把 \texttt{horizon} 改成 5 和 25 各跑 5 万步，看 \texttt{test/return} 曲线差异；或把 \texttt{precision} 改成 32 看速度。\textbf{能改、能解释现象，才算真的会了。}
+
+% ===================================================================
+\section{迁移到``异构无人机编队控制''}
+这是本文最重要的部分。先给你一张差异对照表，再给分阶段路线。
+
+\subsection{差异对照}
+\begin{tabularx}{\textwidth}{L L L L}
+\toprule
+\textbf{维度} & \textbf{本框架（现状）} & \textbf{你的任务（目标）} & \textbf{影响} \\
+\midrule
+观测 & $64\times64\times3$ 图像 & 状态向量（位置/速度/姿态/邻居相对量） & 换编码器，去掉 CNN \\
+\addlinespace
+智能体数 & 1 & $N$（同构或异构） & 联合状态/动作，或 CTDE \\
+\addlinespace
+动作 & DMC 连续 6 维 & 每机 3--4 维推力/姿态指令 & 动作维 $\times N$，探索变难 \\
+\addlinespace
+异构 & 无 & 不同机型/不同动作集/不同动态 & 需要 type 条件化或分头输出 \\
+\addlinespace
+奖励 & DMC 内置，量级 $\sim 1$ & 队形误差、碰撞、能耗、平滑度 & \textbf{必须重新设计并归一化} \\
+\addlinespace
+终止 & 固定时限 & 碰撞/越界/失联 & 需要正确的 \texttt{discount=0} \\
+\addlinespace
+环境 & dm\_control & 你自己的动力学（或 gym-pybullet-drones） & 写 \texttt{wrappers.py} \\
+\bottomrule
+\end{tabularx}
+
+\subsection{M0：先做``单机状态向量版''（1--2 天，必须做）}
+\textbf{目标}：把图像 Dreamer 改成状态向量 Dreamer，在一个 2D 质点/三自由度无人机环境上跑通。这一步不改算法，只改接口。
+
+改动清单（很小，四刀）：
+\begin{enumerate}
+  \item \textbf{\texttt{wrappers.py} 新增环境类}，遵守本仓库的三个约定：
+  \begin{itemize}
+    \item \texttt{observation\_space} / \texttt{action\_space}
+    \item \texttt{step(action) -> (obs\_dict, reward, done, info)}
+    \item \texttt{reset() -> obs\_dict}
+    \item \texttt{obs\_dict} 里必须有 \texttt{'image'} 键（先用这个键装状态向量，省得改 \texttt{load\_dataset}）
+  \end{itemize}
+\begin{Verbatim}[frame=single,fontsize=\small]
+class PointDrone:
+  def __init__(self, dim=12):
+    self._s = np.zeros(dim, np.float32)
+  @property
+  def observation_space(self):
+    return gym.spaces.Dict({'image': gym.spaces.Box(-np.inf, np.inf, (12,), np.float32)})
+  @property
+  def action_space(self):
+    return gym.spaces.Box(-1, 1, (3,), np.float32)   # 加速度指令
+  def reset(self):
+    self._s = np.random.uniform(-1, 1, 12).astype(np.float32)
+    return {'image': self._s}
+  def step(self, a):
+    # 在这里写你的动力学：位置 += 速度*dt，速度 += 加速度*dt ...
+    ...
+    return {'image': self._s}, reward, done, {'discount': np.float32(1.0)}
+\end{Verbatim}
+  \item \textbf{\texttt{dreamer.py:386} \texttt{preprocess()} 必须改}（这一步最容易漏，漏了就永远学不会）：
+\begin{Verbatim}[frame=single,fontsize=\small]
+# 原来：图像专用，会把状态向量除以 255 再减 0.5，直接毁掉数据
+# obs['image'] = tf.cast(obs['image'], dtype) / 255.0 - 0.5
+
+# 改成：按你自己的观测统计量做标准化（或干脆只转 dtype）
+obs['image'] = tf.cast(obs['image'], dtype)
+\end{Verbatim}
+  更稳的做法是固定一组 \texttt{mean/std} 常数（在 prefill 的 5000 步数据上统计一次），训练全程复用。
+  \item \textbf{\texttt{dreamer.py:433} \texttt{make\_env()} 加一个分支}：
+\begin{Verbatim}[frame=single,fontsize=\small]
+elif suite == 'uav':
+  env = wrappers.PointDrone()
+  env = wrappers.ActionRepeat(env, config.action_repeat)
+\end{Verbatim}
+  然后用 \texttt{--task uav\_hover} 启动（\texttt{task.split('\_', 1)} 会切成 \texttt{('uav', 'hover')}）。
+  \item \textbf{\texttt{models.py} 加状态编码器}（替换 \texttt{ConvEncoder}）：
+\begin{Verbatim}[frame=single,fontsize=\small]
+class StateEncoder(tools.Module):
+  def __init__(self, size=256, act=tf.nn.elu):
+    self._size, self._act = size, act
+  def __call__(self, obs):
+    x = obs['image']                       # 就是状态向量
+    x = self.get('h1', tfkl.Dense, 2 * self._size, self._act)(x)
+    x = self.get('h2', tfkl.Dense, self._size, self._act)(x)
+    return x
+\end{Verbatim}
+  \item \textbf{\texttt{dreamer.py:273,276} 换掉编解码器}：
+\begin{Verbatim}[frame=single,fontsize=\small]
+self._encode = models.StateEncoder(self._c.num_units)
+...
+self._decode = models.DenseDecoder((STATE_DIM,), 2, self._c.num_units, act=act)
+\end{Verbatim}
+  \texttt{likes.image = image\_pred.log\_prob(data['image'])} 这行\textbf{不用改}——\texttt{DenseDecoder} 形状改了，\texttt{log\_prob} 自动对上。
+\end{enumerate}
+
+\textbf{验证标准}：\texttt{test/return} 明显高于随机策略，且 \texttt{div}（KL）不塌到 0。做到这一步，你就把 Dreamer 从``图像''解绑了，后面才好动多智能体。
+
+\begin{quote}
+顺带的好处：状态向量输入后，参数量从 630 万降到几十万，训练快一个数量级，你可以在笔记本上做消融实验。
+\end{quote}
+
+\subsection{M1：同构编队 = ``一个超级智能体''（最稳的第一步）}
+\textbf{核心思想（强烈建议从这里开始）}：把 $N$ 架无人机的联合状态当作一个大状态、联合动作当作一个大动作，\textbf{完全不动算法}。
+\begin{Verbatim}[frame=single,fontsize=\small]
+joint_state  = concat(s_1, ..., s_N)          # 例如 N=4, 每机 12 维 -> 48 维
+joint_action = concat(a_1, ..., a_N)          # 例如 N=4, 每机 3 维 -> 12 维
+reward       = f(编队误差, 碰撞, 能耗, 平滑度)
+\end{Verbatim}
+\begin{itemize}
+  \item 优点：改动量几乎是常数（只写环境和奖励），跑通即可得到 baseline，审稿人也认（``centralized Dreamer''）。
+  \item 缺点：$N$ 增大时动作维线性膨胀，探索效率下降；不能直接泛化到没见过 $N$。
+  \item 工程提示：\texttt{\_actdim} 会自动从 \texttt{action\_space.shape[0]} 取（\texttt{dreamer.py:109}），所以只要你把 \texttt{action\_space} 定成 12 维，actor 自动就是 12 维，\textbf{零代码改动}。
+\end{itemize}
+
+\subsection{M2：加``异构''（三种做法，按难度排）}
+\textbf{A. 维度补齐 + 掩码（最简单）}
+把所有机型的动作都补齐到最大维度 $A_{\max}$，用一个 \texttt{mask} 表示哪些维有效，无效维在 \texttt{step()} 里丢弃。观测里加一个 \texttt{type\_one\_hot}（如 \texttt{[1,0]} = 四旋翼，\texttt{[0,1]} = 固定翼）。
+\begin{itemize}
+  \item 改：环境 + 观测拼接。算法零改动。
+  \item 缺点：浪费一点网络容量；掩码处理不干净会学到``无效维也能影响奖励''的假相关。
+\end{itemize}
+
+\textbf{B. 每类一个 actor（\texttt{ActionDecoder} 复制 $N_{\mathrm{type}}$ 份）}
+共享世界模型，按 type 选 actor。改 \texttt{\_build\_model}（加 \texttt{self.\_actors = \{type: ActionDecoder(...)\}}）、\texttt{policy}（按 \texttt{obs['type']} 路由）、\texttt{\_imagine\_ahead}（想象时需要知道每步的 type，可以把它当作常量输入）。
+\begin{itemize}
+  \item 优点：干净，不同动作维/不同分布都能表达。
+  \item 代价：改动最大，要小心 \texttt{tools.Adam} 的变量列表和 \texttt{save/load}（\texttt{variables.pkl} 会整体序列化，结构变了旧 ckpt 全废）。
+\end{itemize}
+
+\textbf{C. 共享 actor + type embedding（折中，论文里常见）}
+把 \texttt{type\_one\_hot} 拼到 \texttt{feat} 后面再喂 actor。改动极小，且能共享动力学知识。
+
+\textbf{推荐}：A 起步验证流程，C 做正式实验，B 留到需要极致性能时。
+
+\subsection{M3：去中心化执行（CTDE，真正的``多智能体世界模型''）}
+到这里就进入研究区了，先想清楚一个设计问题：\textbf{世界模型建模的是``谁''的状态？}
+\begin{tabularx}{\textwidth}{L L L L L}
+\toprule
+\textbf{方案} & \textbf{世界模型} & \textbf{执行} & \textbf{难度} & \textbf{适合的论文故事} \\
+\midrule
+联合模型 + 中心化执行 & 联合状态 & 中心算完再分发 & 低（=M1） & 集中式 baseline \\
+\addlinespace
+联合模型 + 分散执行 & 联合状态，各机共享 & 每机只看自己的隐状态切片 & 中 & \textbf{CTDE}：训练用全局，执行用局部 \\
+\addlinespace
+每机独立模型 + 通信 & 每机一个 RSSM & 传隐状态当``消息'' & 高 & 通信式协同、可扩展 $N$ \\
+\bottomrule
+\end{tabularx}
+
+``M3 中间那行''的具体做法：世界模型在联合状态上训练（数据好拿、样本效率高）；执行时每架飞机用自己的观测 + 邻居发来的隐状态消息 $z_j$ 拼成输入，跑一个\textbf{共享的} actor。这样训练集中、执行分散，是当前多智能体 MBRL 最主流的路子。
+
+\subsection{奖励设计（最容易翻车的地方）}
+Dreamer 的奖励头是 \texttt{Normal(mean, 1)}，损失 $\approx$ MSE。\textbf{奖励量级必须 O(1)}，否则奖励预测学不动，整条链路崩。建议：
+\begin{Verbatim}[frame=single,fontsize=\small]
+reward = (
+    - w1 * 队形误差(位置 RMSE，归一化到米/期望间距)
+    - w2 * 速度一致性误差
+    - w3 * 碰撞惩罚(每对距离 < d_safe 计一次)
+    - w4 * 控制能量(||a||^2)
+    - w5 * 动作变化率(||a_t - a_{t-1}||^2)     # 平滑，真机上必加
+)
+\end{Verbatim}
+总体把单步奖励控制在 $[-1,1]$ 量级，episode 回报自然在 $[-1000,0]$ 或 $[0,\sim1000]$，和 DMC 的尺度一致，超参几乎不用重调。
+
+\subsection{评估指标（写论文用）}
+\begin{tabularx}{\textwidth}{L L}
+\toprule
+\textbf{指标} & \textbf{说明} \\
+\midrule
+队形误差 & 期望相对位置 vs 实际相对位置的 RMS，随时间曲线 \\
+\addlinespace
+收敛时间 & 达到目标误差阈值的步数 \\
+\addlinespace
+碰撞率 & 每 episode 碰撞次数 / 最小机间距离 \\
+\addlinespace
+能耗 & 累计 $\|a\|^2$ 或推力平方和 \\
+\addlinespace
+鲁棒性 & 加风扰/传感器噪声/单机失效后的恢复能力 \\
+\addlinespace
+可扩展性 & $N = 3,5,8$ 时性能衰减 \\
+\addlinespace
+样本效率 & 达到某分数所需环境步（Dreamer 的主打卖点，一定要和 MAPPO 比） \\
+\bottomrule
+\end{tabularx}
+
+\subsection{如果时间紧：先想清楚要不要``必须用 Dreamer''}
+\begin{itemize}
+  \item 若目标是\textbf{发一篇编队控制的应用论文}：MAPPO / HAPPO 成熟得多，调参资料多，撞坑少。
+  \item 若目标是\textbf{世界模型/样本效率的方法论文}：Dreamer 路线是对的，且建议直接看 \textbf{DreamerV3}（离散隐变量 + symlog/two-hot + percentile 归一化，对奖励尺度极不敏感，正是多智能体奖励难设计的解药）。
+  \item 若你想``两边都要''：用 M1 的集中式 Dreamer 当 sample-efficiency 的卖点，用 MAPPO 当 baseline。
+\end{itemize}
+
+% ===================================================================
+\section{七天学习计划（可直接照做）}
+\begin{tabularx}{\textwidth}{l L L}
+\toprule
+\textbf{天} & \textbf{任务} & \textbf{产出 / 检验标准} \\
+\midrule
+D1 & 跑通 walker（或 DummyEnv 冒烟）；看 TensorBoard 的 SCALARS/VIDEO/IMAGES & 能说清 6 类输出文件各是什么 \\
+\addlinespace
+D2 & 画 shape 流动图；在 \texttt{\_train} 里 \texttt{tf.print} 一遍 & 能默写 \texttt{data $\rightarrow$ feat $\rightarrow$ likes $\rightarrow$ loss} 每步维度 \\
+\addlinespace
+D3 & 读 RSSM：\texttt{img\_step} / \texttt{obs\_step} / \texttt{observe} / \texttt{imagine} & 能解释 prior 和 post 的区别，以及为什么 KL 只能一个方向 \\
+\addlinespace
+D4 & 读 \texttt{lambda\_return} + \texttt{\_imagine\_ahead} + \texttt{cumprod} & 能解释 $\lambda=0/1$ 的极端情况和终止处理 \\
+\addlinespace
+D5 & \textbf{M0}：写自己的状态向量环境 + \texttt{StateEncoder} & toy 任务上学出明显高于随机的分数 \\
+\addlinespace
+D6 & \textbf{M1}：4 机编队，联合状态/动作 & 4 机能保持队形，回报曲线上升 \\
+\addlinespace
+D7 & 加异构（type one-hot）+ 加扰动，画对比图 & 得到第一张可放进论文的曲线 \\
+\bottomrule
+\end{tabularx}
+
+% ===================================================================
+\section{坑位清单（血泪版）}
+\begin{enumerate}
+  \item \textbf{TF 版本}：\texttt{from tensorflow.keras.mixed\_precision import experimental as prec} 在 TF $\geq$ 2.9 没有。不要 \texttt{pip install -U tensorflow}。
+  \item \textbf{gym 版本}：旧 API。gym $\geq$ 0.26 的 \texttt{reset()} 返回 tuple，\texttt{Collect.reset()} 会崩。
+  \item \textbf{dm\_control on Windows}：\texttt{MUJOCO\_GL=glfw} 需要交互式桌面；远程/无头会 \texttt{render} 失败。做无人机时\textbf{尽早摆脱 dm\_control}，用自己的环境或 pybullet。
+  \item \textbf{数据集 schema 来自第一条 episode}（\texttt{dreamer.py:401}）：\texttt{types/shapes} 是从 \texttt{next(load\_episodes(...))} 推断的。你改了观测键名/维度后，\textbf{必须清空 \texttt{logdir/*/episodes/} 再跑}，否则会报 shape 不匹配的诡异错误。
+  \item \textbf{\texttt{episodes/} 就是经验池}：无限增长（压缩 npz，5000 步约几十 MB）。长期训练要么定期归档，要么换 \texttt{ReplayBuffer}。
+  \item \textbf{删 episodes = 重置进度}：\texttt{count\_steps} 靠文件名里的长度统计。
+  \item \textbf{\texttt{MirroredStrategy}}：单卡也有额外开销和一堆 \texttt{num\_replicas\_in\_sync} 除法。单卡调试可以直接删掉 strategy，但注意 \texttt{\_train} 里三处 \texttt{/ float(...)} 要一起删。
+  \item \textbf{混合精度}：\texttt{precision=16} 时用 \texttt{LossScaleOptimizer}。如果出现 \texttt{NaN} 或损失不降，先改 \texttt{--precision 32} 排除数值问题。
+  \item \textbf{奖励尺度}：$>$ O(10) 就会学不动（见 8.6）。
+  \item \textbf{\texttt{horizon} 太大}：\texttt{static\_scan} 是 Python 循环，图会爆炸，编译时间飙升；15 是论文默认，别轻易上 50。
+  \item \textbf{随机种子}：\texttt{config.seed} 只影响 agent 内的 numpy RandomState 和一部分采样；TF 全局种子没设，严格复现要自己补 \texttt{tf.random.set\_seed}。
+  \item \textbf{\texttt{pcont}}：默认 \texttt{False}（\texttt{dreamer.py:63}），此时 \texttt{discount} 只有固定折扣。若你的任务有真实终止（碰撞），建议开启 \texttt{--pcont True} 并保留 \texttt{pcont\_scale=10}。
+\end{enumerate}
+
+% ===================================================================
+\section{术语表}
+\begin{tabularx}{\textwidth}{L L L}
+\toprule
+\textbf{英文} & \textbf{中文} & \textbf{一句话} \\
+\midrule
+World Model & 世界模型 & 在隐空间里模拟环境动力学的网络 \\
+\addlinespace
+RSSM & 循环状态空间模型 & GRU(确定性) + 随机隐变量 的混合状态模型 \\
+\addlinespace
+prior / posterior & 先验 / 后验 & 不看观测的猜测 / 看了观测的修正 \\
+\addlinespace
+latent & 隐状态 & \texttt{feat = [z, h]}，230 维 \\
+\addlinespace
+imagination & 想象 & 在模型里闭眼 rollout，不碰真实环境 \\
+\addlinespace
+$\lambda$-return & $\lambda$-回报 & TD 和 MC 的加权折中，$\lambda=0.95$ \\
+\addlinespace
+free nats & 自由比特 & KL 的``免罚额度''，防塌缩 \\
+\addlinespace
+prefill & 预填充 & 训练前先用随机策略攒数据 \\
+\addlinespace
+action\_repeat & 动作重复 & 一个决策重复执行 $k$ 个仿真步（降决策频率） \\
+\addlinespace
+CTDE & 集中训练分散执行 & 训练看全局，执行只看局部 \\
+\bottomrule
+\end{tabularx}
+
+% ===================================================================
+\section{下一步可以让我帮你做的}
+\begin{itemize}
+  \item 写一个 \texttt{PointDrone} 环境 + \texttt{StateEncoder}，把 M0 跑通（需要能执行 Python）；
+  \item 把这份指南变成一张架构图 / 一页 PPT；
+  \item 直接照 M1 搭 4 机编队环境骨架；
+  \item 对比 Dreamer v1 vs v3 的差异表（决定要不要换 v3）。
+\end{itemize}
+
+\begin{quote}
+\textbf{注意}：当前工作区的 Windows 文件权限导致命令执行被拒（\texttt{grantWrite} 失败），所以本文只做了静态分析、没有实际跑训练。若要执行代码/装环境，需要先修权限（或临时切到完全权限）。
+\end{quote}
+
+\end{document}
